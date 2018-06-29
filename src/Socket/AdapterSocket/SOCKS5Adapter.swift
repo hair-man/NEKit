@@ -3,6 +3,7 @@ import Foundation
 public class SOCKS5Adapter: AdapterSocket {
     enum SOCKS5AdapterStatus {
         case invalid,
+        authenticating,
         connecting,
         readingMethodResponse,
         readingResponseFirstPart,
@@ -11,97 +12,115 @@ public class SOCKS5Adapter: AdapterSocket {
     }
     public let serverHost: String
     public let serverPort: Int
-    public let authName: String?
-    public let authPswd: String?
-    
+    public var userName: String?
+    public var passWord: String?
+    public var AuthFlag: Bool
+
     var internalStatus: SOCKS5AdapterStatus = .invalid
-    
-    let helloData = Data(bytes: UnsafePointer<UInt8>(([0x05, 0x02, 0x00, 0x02] as [UInt8])), count: 4)
-    
+
+    let helloData = Data(bytes: UnsafePointer<UInt8>(([0x05, 0x01, 0x00] as [UInt8])), count: 3)
+
     public enum ReadTag: Int {
         case methodResponse = -20000, connectResponseFirstPart, connectResponseSecondPart
     }
-    
+
     public enum WriteTag: Int {
         case open = -21000, connectIPv4, connectIPv6, connectDomainLength, connectPort
     }
-    
-    public init(serverHost: String, serverPort: Int, authName: String?, authPswd: String?) {
+
+    public init(serverHost: String, serverPort: Int) {
         self.serverHost = serverHost
         self.serverPort = serverPort
-        self.authName = authName
-        self.authPswd = authPswd
+        self.AuthFlag = false
+        super.init()
+    }
+
+    public init(serverHost: String, serverPort: Int, userName: String, passWord:String)
+    {
+        self.userName = userName
+        self.passWord = passWord
+        self.serverHost = serverHost
+        self.serverPort = serverPort
+        self.AuthFlag = true
         super.init()
     }
     
     public override func openSocketWith(session: ConnectSession) {
         super.openSocketWith(session: session)
-        
+
         guard !isCancelled else {
             return
         }
-        
+
         do {
             internalStatus = .connecting
             try socket.connectTo(host: serverHost, port: serverPort, enableTLS: false, tlsSettings: nil)
         } catch {}
     }
-    
+
     public override func didConnectWith(socket: RawTCPSocketProtocol) {
         super.didConnectWith(socket: socket)
-        
+
+        if AuthFlag
+        {
+            let authenhelloData = Data(bytes: UnsafePointer<UInt8>(([0x05, 0x01, 0x02] as [UInt8])), count: 3)
+            write(data: authenhelloData)
+            internalStatus = .authenticating
+            socket.readDataTo(length: 2)
+        }
+        else
+        {
         write(data: helloData)
         internalStatus = .readingMethodResponse
         socket.readDataTo(length: 2)
+        }
     }
-    
+
     public override func didRead(data: Data, from socket: RawTCPSocketProtocol) {
         super.didRead(data: data, from: socket)
-        
+
         switch internalStatus {
+        case .authenticating:
+            let data = userName!.data(using: .utf8)!
+            let usernameData = [UInt8](data)
+            let data1 = passWord!.data(using: .utf8)!
+            let passwordData = [UInt8](data1)
+            let usernameLength = UInt8(usernameData.count)
+            let passwordLength = UInt8(passwordData.count)
+            var authenData = Data()
+            
+            authenData.append(contentsOf: [0x01])
+            authenData.append(contentsOf: [usernameLength])
+            authenData.append(contentsOf: usernameData)
+            authenData.append(contentsOf: [passwordLength])
+            authenData.append(contentsOf: passwordData)
+            
+            write(data: authenData)
+            internalStatus = .readingMethodResponse
+            socket.readDataTo(length: 2)
+            
         case .readingMethodResponse:
-            let readbytes: [UInt8] = data.withUnsafeBytes{
-                [UInt8](UnsafeBufferPointer(start: $0, count: data.count))
-            }
             var response: [UInt8]
-            
-            guard readbytes[0] == 0x05 else { return }
-            
-            if readbytes[1] == 0x02
-            {
-                guard let _ = self.authName, let _ = self.authPswd else { return }
-                response = [0x01]
-                response.append(UInt8(authName!.utf8.count))
-                response += [UInt8](authName!.utf8)
-                response.append(UInt8(authPswd!.utf8.count))
-                response += [UInt8](authPswd!.utf8)
-                
-                write(data: Data(bytes: response))
-                socket.readDataTo(length: 2)
+            if session.isIPv4() {
+                response = [0x05, 0x01, 0x00, 0x01]
+                let address = IPAddress(fromString: session.host)!
+                response += [UInt8](address.dataInNetworkOrder)
+            } else if session.isIPv6() {
+                response = [0x05, 0x01, 0x00, 0x04]
+                let address = IPAddress(fromString: session.host)!
+                response += [UInt8](address.dataInNetworkOrder)
+            } else {
+                response = [0x05, 0x01, 0x00, 0x03]
+                response.append(UInt8(session.host.utf8.count))
+                response += [UInt8](session.host.utf8)
             }
-            else
-            {
-                if session.isIPv4() {
-                    response = [0x05, 0x01, 0x00, 0x01]
-                    let address = IPAddress(fromString: session.host)!
-                    response += [UInt8](address.dataInNetworkOrder)
-                } else if session.isIPv6() {
-                    response = [0x05, 0x01, 0x00, 0x04]
-                    let address = IPAddress(fromString: session.host)!
-                    response += [UInt8](address.dataInNetworkOrder)
-                } else {
-                    response = [0x05, 0x01, 0x00, 0x03]
-                    response.append(UInt8(session.host.utf8.count))
-                    response += [UInt8](session.host.utf8)
-                }
-                
-                let portBytes: [UInt8] = Utils.toByteArray(UInt16(session.port)).reversed()
-                response.append(contentsOf: portBytes)
-                write(data: Data(bytes: response))
-                
-                internalStatus = .readingResponseFirstPart
-                socket.readDataTo(length: 5)
-            }
+
+            let portBytes: [UInt8] = Utils.toByteArray(UInt16(session.port)).reversed()
+            response.append(contentsOf: portBytes)
+            write(data: Data(bytes: response))
+
+            internalStatus = .readingResponseFirstPart
+            socket.readDataTo(length: 5)
         case .readingResponseFirstPart:
             var readLength = 0
             data.withUnsafeBytes { (ptr: UnsafePointer<UInt8>) in
@@ -128,13 +147,12 @@ public class SOCKS5Adapter: AdapterSocket {
             return
         }
     }
-    
+
     override open func didWrite(data: Data?, by socket: RawTCPSocketProtocol) {
         super.didWrite(data: data, by: socket)
-        
+
         if internalStatus == .forwarding {
             delegate?.didWrite(data: data, by: self)
         }
     }
 }
-
