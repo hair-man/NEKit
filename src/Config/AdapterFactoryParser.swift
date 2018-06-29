@@ -71,10 +71,7 @@ struct AdapterFactoryParser {
             throw ConfigurationParserError.adapterParsingError(errorInfo: "Port (port) is required.")
         }
 
-	guard let username = config["username"].string, let password = config["password"].string else {
-            return SOCKS5AdapterFactory(serverHost: host, serverPort: port, authName: nil, authPswd: nil)
-        }
-        return SOCKS5AdapterFactory(serverHost: host, serverPort: port, authName: username, authPswd: password)
+        return SOCKS5AdapterFactory(serverHost: host, serverPort: port)
     }
 
     static func parseShadowsocksAdapterFactory(_ config: Yaml) throws -> ShadowsocksAdapterFactory {
